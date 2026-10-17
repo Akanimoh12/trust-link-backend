@@ -1,7 +1,11 @@
 import { Account, Keypair } from '@stellar/stellar-sdk';
 import { ContractService } from './contract.service';
 import { ContractCallFailedException } from './contract-call-failed.exception';
-import { DEFAULT_AUTO_RELEASE_MAX_RETRIES } from './contract.constants';
+import {
+  DEFAULT_AUTO_RELEASE_MAX_RETRIES,
+  TX_CONFIRM_POLL_INTERVAL_MS,
+  TX_CONFIRM_TIMEOUT_MS,
+} from './contract.constants';
 import { ConfigService } from '../config/config.service';
 
 // Minimal StellarServer stub — jest.fn() so each test controls its behaviour.
@@ -59,16 +63,20 @@ describe('ContractService', () => {
   });
 
   describe('submitAutoRelease — sequence error retries', () => {
-    it('retries up to maxRetries on tx_bad_seq then throws', async () => {
+    it('retries up to maxRetries on tx_bad_seq then throws ContractCallFailedException', async () => {
       const server = makeServer();
       server.loadAccount.mockResolvedValue({ sequence: '1' });
       server.submitTransaction.mockRejectedValue(new Error('tx_bad_seq'));
 
       const svc = new ContractService(server);
 
-      await expect(
-        svc.submitAutoRelease(ESCROW, SOURCE, DEFAULT_AUTO_RELEASE_MAX_RETRIES),
-      ).rejects.toThrow('Max retries exceeded');
+      const attempt = svc.submitAutoRelease(
+        ESCROW,
+        SOURCE,
+        DEFAULT_AUTO_RELEASE_MAX_RETRIES,
+      );
+      await expect(attempt).rejects.toThrow('Max retries exceeded');
+      await expect(attempt).rejects.toBeInstanceOf(ContractCallFailedException);
 
       // 1 initial attempt + DEFAULT_AUTO_RELEASE_MAX_RETRIES retries
       expect(server.loadAccount).toHaveBeenCalledTimes(
@@ -76,7 +84,7 @@ describe('ContractService', () => {
       );
     });
 
-    it('retries exactly maxRetries times before throwing Max retries exceeded', async () => {
+    it('retries exactly maxRetries times before throwing ContractCallFailedException', async () => {
       const server = makeServer();
       server.loadAccount.mockResolvedValue({ sequence: '1' });
       server.submitTransaction.mockRejectedValue(
@@ -86,9 +94,9 @@ describe('ContractService', () => {
       const svc = new ContractService(server);
       const maxRetries = 1;
 
-      await expect(
-        svc.submitAutoRelease(ESCROW, SOURCE, maxRetries),
-      ).rejects.toThrow('Max retries exceeded');
+      const attempt = svc.submitAutoRelease(ESCROW, SOURCE, maxRetries);
+      await expect(attempt).rejects.toThrow('Max retries exceeded');
+      await expect(attempt).rejects.toBeInstanceOf(ContractCallFailedException);
 
       expect(server.loadAccount).toHaveBeenCalledTimes(1 + maxRetries);
     });
@@ -445,6 +453,62 @@ describe('ContractService', () => {
 
       expect(hash).toBe('soroban-hash-1');
       expect(server.getTransaction).toHaveBeenCalledWith('soroban-hash-1');
+    });
+
+    // ── Issue #921 — never report an unconfirmed transaction as successful ──
+
+    it('polls getTransaction through PENDING/NOT_FOUND until a final status', async () => {
+      const server = makeSorobanRpcServer();
+      // @ts-expect-error — exercising the getTransaction polling path
+      delete server.pollTransaction;
+      server.getTransaction
+        .mockResolvedValueOnce({ status: 'PENDING' })
+        .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+        .mockResolvedValueOnce({ status: 'SUCCESS' });
+
+      const svc = new ContractService(server, makeConfig());
+      const hash = await svc.resolveDispute(ESCROW, 'RELEASE', ADMIN);
+
+      expect(hash).toBe('soroban-hash-1');
+      // One initial read plus one per non-final status.
+      expect(server.getTransaction).toHaveBeenCalledTimes(3);
+    });
+
+    it('throws ContractCallFailedException when getTransaction never reaches a final status', async () => {
+      jest.useFakeTimers();
+      try {
+        const server = makeSorobanRpcServer();
+        // @ts-expect-error — exercising the getTransaction polling path
+        delete server.pollTransaction;
+        server.getTransaction.mockResolvedValue({ status: 'NOT_FOUND' });
+
+        const svc = new ContractService(server, makeConfig());
+        const pending = svc.resolveDispute(ESCROW, 'RELEASE', ADMIN);
+        const assertion = expect(pending).rejects.toBeInstanceOf(
+          ContractCallFailedException,
+        );
+
+        await jest.advanceTimersByTimeAsync(
+          TX_CONFIRM_TIMEOUT_MS + TX_CONFIRM_POLL_INTERVAL_MS,
+        );
+        await assertion;
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('fails instead of reporting SUCCESS when no confirmation method exists', async () => {
+      const server = makeSorobanRpcServer();
+      // @ts-expect-error — neither pollTransaction nor getTransaction available
+      delete server.pollTransaction;
+      // @ts-expect-error — neither pollTransaction nor getTransaction available
+      delete server.getTransaction;
+
+      const svc = new ContractService(server, makeConfig());
+
+      await expect(
+        svc.resolveDispute(ESCROW, 'RELEASE', ADMIN),
+      ).rejects.toBeInstanceOf(ContractCallFailedException);
     });
 
     describe('CONTRACT_ID configuration requirement (Issue #814)', () => {

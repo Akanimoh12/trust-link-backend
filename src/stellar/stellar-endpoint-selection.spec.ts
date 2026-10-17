@@ -120,14 +120,21 @@ describe('Stellar endpoint selection (#871)', () => {
         mockedAxios.get.mockResolvedValue({
           data: { _embedded: { records: [] } },
         });
+        const tracing = createTracingMock().service;
         const service = new EventReplayService(
-          config({ STELLAR_NETWORK: network }),
           { processOperationDto: jest.fn() } as never,
           {
             get: jest.fn().mockResolvedValue(undefined),
             set: jest.fn(),
           } as never,
-          createTracingMock().service,
+          tracing,
+          new HorizonService(
+            config({
+              STELLAR_NETWORK: network,
+              STELLAR_HORIZON_URL: undefined,
+            }),
+            tracing,
+          ),
         );
 
         await service.onModuleInit();
@@ -138,6 +145,35 @@ describe('Stellar endpoint selection (#871)', () => {
         );
       },
     );
+
+    it('requests STELLAR_HORIZON_URL instead of the network default', async () => {
+      mockedAxios.get.mockResolvedValue({
+        data: { _embedded: { records: [] } },
+      });
+      const tracing = createTracingMock().service;
+      const service = new EventReplayService(
+        { processOperationDto: jest.fn() } as never,
+        {
+          get: jest.fn().mockResolvedValue(undefined),
+          set: jest.fn(),
+        } as never,
+        tracing,
+        new HorizonService(
+          config({
+            STELLAR_NETWORK: 'MAINNET',
+            STELLAR_HORIZON_URL: 'https://horizon.override.example',
+          }),
+          tracing,
+        ),
+      );
+
+      await service.onModuleInit();
+
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        expect.stringContaining('https://horizon.override.example/operations'),
+        expect.anything(),
+      );
+    });
   });
 
   describe('CSP connect-src', () => {

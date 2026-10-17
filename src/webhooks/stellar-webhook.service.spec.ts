@@ -26,6 +26,7 @@ import { EscrowRepository } from '../escrow/escrow.repository';
 import { NotificationsService } from '../notifications/notifications.service';
 import { EscrowRecord } from '../prisma/prisma.service';
 import { StellarWebhookDto } from './dto/stellar-webhook.dto';
+import { StellarWebhookRepository } from './stellar-webhook.repository';
 import { StellarWebhookService } from './stellar-webhook.service';
 import { TracingService } from '../tracing/tracing.service';
 import { createTracingMock } from '../../test/unit/tracing-mock';
@@ -79,6 +80,26 @@ function makePaymentDto(
   };
 }
 
+/**
+ * In-memory stand-in for the persisted `ProcessedWebhookEvent` cursor. The
+ * service no longer keeps its own dedupe state, so tests must supply a
+ * repository that actually remembers what was marked.
+ */
+function makeWebhookRepositoryMock(): jest.Mocked<StellarWebhookRepository> {
+  const processed = new Set<string>();
+  return {
+    isProcessed: jest.fn((id: string) => Promise.resolve(processed.has(id))),
+    markProcessed: jest.fn((id: string) => {
+      processed.add(id);
+      return Promise.resolve();
+    }),
+    unmarkProcessed: jest.fn((id: string) => {
+      processed.delete(id);
+      return Promise.resolve();
+    }),
+  } as unknown as jest.Mocked<StellarWebhookRepository>;
+}
+
 // ---------------------------------------------------------------------------
 // Test setup
 // ---------------------------------------------------------------------------
@@ -116,6 +137,10 @@ describe('StellarWebhookService – handlePayment (issue #396)', () => {
         { provide: EscrowRepository, useValue: mockEscrowRepository },
         { provide: ConfigService, useValue: mockConfigService },
         { provide: NotificationsService, useValue: mockNotificationsService },
+        {
+          provide: StellarWebhookRepository,
+          useValue: makeWebhookRepositoryMock(),
+        },
       ],
     }).compile();
 
@@ -394,7 +419,7 @@ describe('StellarWebhookService – handlePayment (issue #396)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Issue #734 — no-Prisma path and duplicate-delivery (replay) guard
+// Issues #734 / #922 — persisted duplicate-delivery (replay) guard
 // ---------------------------------------------------------------------------
 
 import * as crypto from 'crypto';
@@ -409,15 +434,16 @@ function sign(rawBody: Buffer): string {
     .digest('hex');
 }
 
-describe('StellarWebhookService — no-Prisma path and replay guard (issue #734)', () => {
+describe('StellarWebhookService — persisted replay guard (issues #734, #922)', () => {
   let escrowRepository: jest.Mocked<
     Pick<EscrowRepository, 'findByVendor' | 'updateState'>
   >;
   let notificationsService: jest.Mocked<
     Pick<NotificationsService, 'notifyFunded'>
   >;
+  let webhookRepository: jest.Mocked<StellarWebhookRepository>;
 
-  /** Build a service instance with no PrismaService injected (the @Optional() path). */
+  /** Build a service instance wired to the persisted webhook cursor. */
   function makeService(): StellarWebhookService {
     return new StellarWebhookService(
       {
@@ -428,7 +454,7 @@ describe('StellarWebhookService — no-Prisma path and replay guard (issue #734)
       } as unknown as ConfigService,
       escrowRepository as unknown as EscrowRepository,
       notificationsService as unknown as NotificationsService,
-      // no PrismaService argument → this.prisma is undefined
+      webhookRepository,
     );
   }
 
@@ -440,6 +466,7 @@ describe('StellarWebhookService — no-Prisma path and replay guard (issue #734)
     notificationsService = {
       notifyFunded: jest.fn().mockResolvedValue(undefined),
     };
+    webhookRepository = makeWebhookRepositoryMock();
   });
 
   afterEach(() => {
@@ -457,49 +484,43 @@ describe('StellarWebhookService — no-Prisma path and replay guard (issue #734)
     return service.handleEvent(rawBody, signature, dto);
   }
 
-  // ── Branch: this.prisma absent — first delivery uses processedIds.add ────
+  // ── Issue #922: replay must honour the persisted dedupe ───────────────────
 
-  describe('no-Prisma path (this.prisma guards)', () => {
-    it('processes the first delivery using the in-memory processedIds set', async () => {
+  describe('persisted dedupe across the webhook and replay paths', () => {
+    it('skips an operation already processed by the webhook when replaying', async () => {
       const service = makeService();
-      const dto = makePaymentDto({ id: 'op-no-prisma-1' });
+      const dto = makePaymentDto({ id: 'op-replay-dedupe' });
 
-      const result = await callHandleEvent(service, dto);
+      const delivered = await callHandleEvent(service, dto);
+      expect(delivered).toEqual({ received: true });
+      expect(webhookRepository.markProcessed).toHaveBeenCalledWith(
+        'op-replay-dedupe',
+      );
 
-      expect(result).toEqual({ received: true });
-      // No Prisma means no DB call — repository is still called for the event itself
-      expect(escrowRepository.findByVendor).toHaveBeenCalledWith(dto.to);
-    });
-
-    it('uses processedIds.has for duplicate check when Prisma is absent', async () => {
-      const service = makeService();
-      const dto = makePaymentDto({ id: 'op-no-prisma-2' });
-
-      // First delivery — processes normally
-      await callHandleEvent(service, dto);
-      // Second delivery with the same id — must be a no-op
-      const second = await callHandleEvent(service, dto);
-
-      expect(second).toEqual({
-        received: true,
-        skipped: true,
-        reason: 'duplicate',
-      });
-      // findByVendor called exactly once (from the first delivery only)
+      // Replay of the same operation must observe the persisted mark and skip.
+      const replayed = await service.processOperationDto(dto);
+      expect(replayed).toEqual({ processed: false, skipped: true });
       expect(escrowRepository.findByVendor).toHaveBeenCalledTimes(1);
     });
 
-    it('rolls back processedIds on processEvent failure (no Prisma)', async () => {
+    it('marks and rolls back the persisted cursor on processing failure', async () => {
       const service = makeService();
-      const dto = makePaymentDto({ id: 'op-no-prisma-rollback' });
+      const dto = makePaymentDto({ id: 'op-persisted-rollback' });
       escrowRepository.findByVendor.mockRejectedValueOnce(
         new Error('DB unavailable'),
       );
 
-      // First call fails — the id should be removed from processedIds
+      // The first delivery fails — the persisted mark must be rolled back.
       await callHandleEvent(service, dto).catch(() => undefined);
 
-      // Second call with the same id must not be treated as a duplicate
+      expect(webhookRepository.markProcessed).toHaveBeenCalledWith(
+        'op-persisted-rollback',
+      );
+      expect(webhookRepository.unmarkProcessed).toHaveBeenCalledWith(
+        'op-persisted-rollback',
+      );
+
+      // Second delivery with the same id must not be treated as a duplicate.
       escrowRepository.findByVendor.mockResolvedValueOnce([]);
       const retry = await callHandleEvent(service, dto);
 
@@ -508,7 +529,7 @@ describe('StellarWebhookService — no-Prisma path and replay guard (issue #734)
     });
   });
 
-  // ── Branch: this.processedIds.has(dto.id) duplicate guard ────────────────
+  // ── Duplicate guard via the persisted cursor ─────────────────────────────
 
   describe('duplicate-delivery (replay) guard', () => {
     it('returns skipped:true on the second delivery of the same operation id', async () => {
@@ -578,6 +599,7 @@ describe('StellarWebhookService — no-Prisma path and replay guard (issue #734)
         } as unknown as ConfigService,
         escrowRepository as unknown as EscrowRepository,
         notificationsService as unknown as NotificationsService,
+        webhookRepository,
       );
     }
 

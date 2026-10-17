@@ -32,6 +32,7 @@ import { StellarWebhookService } from '../../src/webhooks/stellar-webhook.servic
 import { ConfigService } from '../../src/config/config.service';
 import { EscrowRepository } from '../../src/escrow/escrow.repository';
 import { NotificationsService } from '../../src/notifications/notifications.service';
+import { StellarWebhookRepository } from '../../src/webhooks/stellar-webhook.repository';
 
 describe('StellarWebhookController raw body extraction', () => {
   it('passes the captured Buffer straight through to the service for signature verification', async () => {
@@ -78,6 +79,25 @@ describe('StellarWebhookController (issue #574)', () => {
 
   const WEBHOOK_SECRET = 'unit-test-webhook-secret';
 
+  /**
+   * Set-backed stand-in for the persisted webhook cursor, so the real
+   * (unmocked) `StellarWebhookService` can dedupe across requests.
+   */
+  function makeInMemoryWebhookRepository() {
+    const processed = new Set<string>();
+    return {
+      isProcessed: jest.fn((id: string) => Promise.resolve(processed.has(id))),
+      markProcessed: jest.fn((id: string) => {
+        processed.add(id);
+        return Promise.resolve();
+      }),
+      unmarkProcessed: jest.fn((id: string) => {
+        processed.delete(id);
+        return Promise.resolve();
+      }),
+    };
+  }
+
   const sign = (body: Buffer, secret: string): string =>
     crypto.createHmac('sha256', secret).update(body).digest('hex');
 
@@ -102,6 +122,10 @@ describe('StellarWebhookController (issue #574)', () => {
         },
         { provide: EscrowRepository, useValue: escrowRepository },
         { provide: NotificationsService, useValue: notificationsService },
+        {
+          provide: StellarWebhookRepository,
+          useValue: makeInMemoryWebhookRepository(),
+        },
       ],
     }).compile();
 
