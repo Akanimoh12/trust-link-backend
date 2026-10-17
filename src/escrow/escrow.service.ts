@@ -3,7 +3,9 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
   Logger,
   Optional,
@@ -357,7 +359,9 @@ export class EscrowService {
       const message =
         error instanceof Error ? error.message : 'Failed to retrieve escrow';
       this.logger.error(`Error finding escrow ${id}: ${message}`, error);
-      throw new BadRequestException('Failed to retrieve escrow');
+      // issue #930: an outage is a server fault, not a bad request — a 4xx
+      // here told monitoring and the frontend the client was wrong.
+      throw new InternalServerErrorException('Failed to retrieve escrow');
     }
   }
 
@@ -870,7 +874,16 @@ export class EscrowService {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to ship escrow';
-      this.logger.error(`Failed to ship escrow ${escrowId}: ${message}`, error);
+      // issue #931: an expected client error (400/403/409) already got its
+      // own warn/no log above; only an unexpected failure belongs at error.
+      const isClientError =
+        error instanceof HttpException && error.getStatus() < 500;
+      if (!isClientError) {
+        this.logger.error(
+          `Failed to ship escrow ${escrowId}: ${message}`,
+          error,
+        );
+      }
       throw error;
     }
   }

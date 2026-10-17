@@ -127,18 +127,23 @@ export class BuyerDisputeService {
     });
     // Transition the linked escrow to DISPUTED and evict the cache so
     // a subsequent findById sees the fresh state.
-    await this.escrowRepository.updateState(escrowId, 'DISPUTED');
+    const disputedEscrow = await this.escrowRepository.updateState(
+      escrowId,
+      'DISPUTED',
+    );
 
     // Delivery retries email and SMS with backoff, so it can take seconds
     // when a provider is down; the response must not wait for it.
-    this.notificationsService.notifyDisputed(escrow).catch((error) => {
+    // Notify with the post-update record (issue #929) — the one loaded
+    // above still carries the pre-dispute state (FUNDED/SHIPPED/DELIVERED).
+    this.notificationsService.notifyDisputed(disputedEscrow).catch((error) => {
       this.logger.error(
         `Failed to send disputed notification for escrow ${escrow.id}`,
         error,
       );
     });
     this.notificationsService
-      .notifyDisputedAdmin(escrow, adminAddress)
+      .notifyDisputedAdmin(disputedEscrow, adminAddress)
       .catch((error) => {
         this.logger.error(
           `Failed to send admin disputed notification for escrow ${escrow.id}`,
