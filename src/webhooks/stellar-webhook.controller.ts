@@ -9,8 +9,7 @@ import {
   Req,
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { Throttle } from '@nestjs/throttler';
-import { THROTTLE_WINDOW_MS } from '../common/security/throttle.config';
+import { SkipThrottle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { StellarWebhookDto } from './dto/stellar-webhook.dto';
 import { StellarWebhookResponseDto } from './dto/stellar-webhook-response.dto';
@@ -43,7 +42,12 @@ export class StellarWebhookController {
     status: 400,
     description: 'Invalid payload or missing HMAC signature.',
   })
-  @Throttle({ default: { limit: 60, ttl: THROTTLE_WINDOW_MS } })
+  // Issue #923 — exempt the signed Stellar webhook from rate limiting. Every
+  // delivery comes from the same Horizon sender, so the shared per-IP bucket
+  // fills after 60 events in a minute and a burst of payments is dropped (429)
+  // unless the sender retries. The HMAC signature, not the request rate, is
+  // what authenticates this route; rejections still happen on a bad signature.
+  @SkipThrottle()
   @Post('stellar')
   @HttpCode(HttpStatus.OK)
   async handleStellarWebhook(

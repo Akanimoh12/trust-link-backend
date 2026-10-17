@@ -293,6 +293,7 @@ R-SEC-20: Public endpoints must be rate-limited at 60 requests/minute per IP.
 R-SEC-21: Auth challenge endpoints must be rate-limited at 10 requests/minute per IP.
 R-SEC-22: Evidence upload must be rate-limited at 10 requests/minute per user.
 R-SEC-23: Rate limit exceeded must return 429 with Retry-After header.
+R-SEC-24: The signed Stellar webhook (`POST /webhooks/stellar`) must be exempt from rate limiting; every delivery is authenticated by HMAC, so a burst of payments must not be dropped.
 
 ---
 

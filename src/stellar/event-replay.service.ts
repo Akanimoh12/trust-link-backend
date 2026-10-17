@@ -1,10 +1,9 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import axios from 'axios';
-import { ConfigService } from '../config/config.service';
 import { StellarWebhookDto } from '../webhooks/dto/stellar-webhook.dto';
 import { StellarWebhookService } from '../webhooks/stellar-webhook.service';
 import { CursorService } from './cursor.service';
-import { STELLAR_HORIZON_URLS } from './stellar-endpoints';
+import { HorizonService } from './horizon.service';
 import { TracingService } from '../tracing/tracing.service';
 
 @Injectable()
@@ -12,10 +11,10 @@ export class EventReplayService implements OnModuleInit {
   private readonly logger = new Logger(EventReplayService.name);
 
   constructor(
-    private readonly config: ConfigService,
     private readonly webhookService: StellarWebhookService,
     private readonly cursorService: CursorService,
     private readonly tracing: TracingService,
+    private readonly horizonService: HorizonService,
   ) {}
 
   /**
@@ -42,9 +41,10 @@ export class EventReplayService implements OnModuleInit {
 
   private async onModuleInitInternal(): Promise<void> {
     try {
-      const network = this.config.get('STELLAR_NETWORK') || 'TESTNET';
-      const horizon =
-        STELLAR_HORIZON_URLS[network === 'MAINNET' ? 'MAINNET' : 'TESTNET'];
+      // Resolve the Horizon base URL through HorizonService (issue #920) so the
+      // replay honours STELLAR_HORIZON_URL exactly like every other caller,
+      // instead of rebuilding the network default and ignoring the override.
+      const horizon = this.horizonService.getHorizonUrl();
 
       const cursor = await this.cursorService.get();
 

@@ -13,7 +13,11 @@ import {
 } from '@stellar/stellar-sdk';
 import { ConfigService } from '../config/config.service';
 import { TracingService } from '../tracing/tracing.service';
-import { DEFAULT_AUTO_RELEASE_MAX_RETRIES } from './contract.constants';
+import {
+  DEFAULT_AUTO_RELEASE_MAX_RETRIES,
+  TX_CONFIRM_POLL_INTERVAL_MS,
+  TX_CONFIRM_TIMEOUT_MS,
+} from './contract.constants';
 import { ContractCallFailedException } from './contract-call-failed.exception';
 import { STELLAR_SERVER } from './stellar.tokens';
 
@@ -206,7 +210,7 @@ export class ContractService {
         }
 
         if (this.isSequenceError(error)) {
-          throw new Error('Max retries exceeded');
+          throw new ContractCallFailedException('Max retries exceeded');
         }
 
         throw new ContractCallFailedException(
@@ -679,16 +683,54 @@ export class ContractService {
           return this.server.pollTransaction(hash);
         }
         if (typeof this.server?.getTransaction === 'function') {
-          const res = await this.server.getTransaction(hash);
-          const statusStr = String(res.status);
-          if (statusStr === 'NOT_FOUND' || statusStr === 'PENDING') {
-            return res;
-          }
-          return res;
+          // Issue #921 — the RPC `getTransaction` only reports a point-in-time
+          // status, so poll it until the transaction reaches a final status or
+          // the bounded timeout elapses rather than returning PENDING/NOT_FOUND
+          // immediately (which the caller would treat as success).
+          const getTransaction = this.server.getTransaction.bind(this.server);
+          return this.pollWithGetTransaction(hash, getTransaction);
         }
-        return { status: 'SUCCESS' } as rpc.Api.GetTransactionResponse;
+        // Issue #921 — no way to confirm means no success can be reported. The
+        // previous fallback returned a fabricated `{ status: 'SUCCESS' }`,
+        // silently marking an unconfirmed transaction as released.
+        throw new ContractCallFailedException(
+          'Unable to confirm transaction: the Stellar server exposes neither pollTransaction nor getTransaction',
+        );
       },
     );
+  }
+
+  /**
+   * Polls `getTransaction` until the status is final (anything other than
+   * NOT_FOUND/PENDING) or the bounded timeout is reached. On timeout it
+   * throws rather than reporting an unconfirmed transaction as successful.
+   */
+  private async pollWithGetTransaction(
+    hash: string,
+    getTransaction: (hash: string) => Promise<rpc.Api.GetTransactionResponse>,
+  ): Promise<rpc.Api.GetTransactionResponse> {
+    const deadline = Date.now() + TX_CONFIRM_TIMEOUT_MS;
+    let response = await getTransaction(hash);
+
+    while (this.isPendingStatus(response.status)) {
+      if (Date.now() >= deadline) {
+        throw new ContractCallFailedException(
+          `Transaction ${hash} was not confirmed within ${TX_CONFIRM_TIMEOUT_MS}ms`,
+        );
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, TX_CONFIRM_POLL_INTERVAL_MS),
+      );
+      response = await getTransaction(hash);
+    }
+
+    return response;
+  }
+
+  /** True while a `getTransaction` status is non-final (still in flight). */
+  private isPendingStatus(status: unknown): boolean {
+    const value = String(status);
+    return value === 'NOT_FOUND' || value === 'PENDING';
   }
 
   private isSimulationError(
