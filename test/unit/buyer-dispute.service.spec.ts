@@ -151,17 +151,19 @@ describe('BuyerDisputeService.openDispute (issue #41)', () => {
       expect(result.reason).toBe(DisputeReasonCategory.ITEM_NOT_AS_DESCRIBED);
     });
 
-    it('notifies vendor channel and admin channel on dispute creation', async () => {
+    it('notifies vendor channel and admin channel with the post-update state (issue #929)', async () => {
+      const disputedEscrow = { ...shippedEscrow, state: 'DISPUTED' as const };
       escrowRepository.findById.mockResolvedValue(shippedEscrow);
+      escrowRepository.updateState.mockResolvedValue(disputedEscrow);
       disputeRepository.create.mockResolvedValue(createdDispute);
 
       await service.openDispute('escrow-abc', BUYER, openDisputeDto);
 
       expect(notificationsService.notifyDisputed).toHaveBeenCalledWith(
-        shippedEscrow,
+        disputedEscrow,
       );
       expect(notificationsService.notifyDisputedAdmin).toHaveBeenCalledWith(
-        shippedEscrow,
+        disputedEscrow,
         ADMIN,
       );
     });

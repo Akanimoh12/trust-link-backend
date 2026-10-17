@@ -350,10 +350,10 @@ describe('EscrowService.handleShipment (issue #16)', () => {
     });
   });
 
-  it('findById wraps a non-NotFoundException repository error as BadRequestException', async () => {
+  it('findById does not report a repository outage as a 4xx client error (issue #930)', async () => {
     repository.findById.mockRejectedValue(new Error('connection reset'));
 
-    await expect(service.findById(fundedEscrow.id)).rejects.toThrow(
+    await expect(service.findById(fundedEscrow.id)).rejects.not.toThrow(
       BadRequestException,
     );
   });
