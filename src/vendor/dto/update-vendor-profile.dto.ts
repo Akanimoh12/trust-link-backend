@@ -1,3 +1,5 @@
+import { PartialType } from '@nestjs/swagger';
+import { CreateVendorProfileDto } from './create-vendor-profile.dto';
 import {
   IsEmail,
   IsOptional,
@@ -14,19 +16,9 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
  * fields are optional — only provided fields are updated. Used by
  * PATCH /vendor/profile.
  */
-export class UpdateVendorProfileDto {
-  @ApiPropertyOptional({
-    description: 'Updated registered business or trading name of the vendor.',
-    minLength: 2,
-    maxLength: 100,
-    example: 'Acme Electronics Ltd',
-  })
-  @IsOptional()
-  @IsString()
-  @MinLength(2, { message: 'Business name must be at least 2 characters long' })
-  @MaxLength(100, { message: 'Business name must not exceed 100 characters' })
-  @Transform(({ value }: { value: string }) => value?.trim())
-  businessName?: string;
+export class UpdateVendorProfileDto extends PartialType(
+  CreateVendorProfileDto,
+) {}
 
   @ApiPropertyOptional({
     description: 'Updated contact email address for the vendor.',
