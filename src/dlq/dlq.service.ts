@@ -1,4 +1,9 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   FailedTransactionFilter,
   FailedTransactionRepository,
@@ -110,7 +115,9 @@ export class DlqService {
   async replay(id: string, replay: ReplayFn): Promise<FailedTransactionRecord> {
     const record = await this.requireRecord(id);
     if (record.status !== 'PENDING_REVIEW') {
-      throw new Error(`Failed transaction ${id} is not pending review`);
+      throw new ConflictException(
+        `Failed transaction ${id} is not pending review (status: ${record.status})`,
+      );
     }
 
     // Issue #952: Atomically claim the record before replaying
@@ -148,17 +155,21 @@ export class DlqService {
    * Marks a dead-letter row `ABANDONED` — an operator has decided the
    * failed operation will not be retried — and stamps `reviewedAt`.
    *
-   * Terminal in practice: `replay` only acts on `PENDING_REVIEW` rows, so an
-   * abandoned row can no longer be replayed through this service. Unlike
-   * `replay` it does **not** check the current status, so calling it on an
-   * already-`REPLAYED` row would overwrite the status — callers should only
-   * abandon rows still pending review. Throws `NotFoundException` for an
+   * Only records in `PENDING_REVIEW` status can be abandoned (issue #951);
+   * attempting to abandon a record that is already `REPLAYED` or `ABANDONED`
+   * throws `ConflictException` (HTTP 409). Throws `NotFoundException` for an
    * unknown id.
    */
   async abandon(id: string): Promise<FailedTransactionRecord> {
-    await this.requireRecord(id);
+    const record = await this.requireRecord(id);
+    if (record.status !== 'PENDING_REVIEW') {
+      throw new ConflictException(
+        `Failed transaction ${id} cannot be abandoned (status: ${record.status})`,
+      );
+    }
     return this.failedTransactions.markAbandoned(id);
   }
+
 
   /**
    * Stamps `reviewedAt` without changing `status` — an operator has looked
