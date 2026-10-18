@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Logger,
+  NotFoundException,
   Param,
   Post,
   Req,
@@ -75,8 +76,12 @@ export class StressTestController {
   @ApiParam({ name: 'testId', example: 'stress-test-2026-07-29' })
   @Throttle({ default: { limit: 30, ttl: THROTTLE_WINDOW_MS } })
   @Get('active/:testId')
-  getActiveTest(@Param('testId') testId: string): StressTestResult | undefined {
-    return this.stressTestService.getActiveTest(testId);
+  getActiveTest(@Param('testId') testId: string): StressTestResult {
+    const result = this.stressTestService.getActiveTest(testId);
+    if (!result) {
+      throw new NotFoundException(`Stress test with id "${testId}" not found`);
+    }
+    return result;
   }
 
   @ApiOperation({ summary: 'List all currently active stress tests' })
