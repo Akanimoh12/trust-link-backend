@@ -109,6 +109,7 @@ export class AppController {
     description: 'Internal server error.',
     type: ErrorResponseDto,
   })
+  @SkipThrottle() // Probe endpoints must never be rate-limited (issue #970).
   @Get('health/live')
   @HttpCode(HttpStatus.OK)
   getLiveness(): LivenessResponseDto {
@@ -157,6 +158,7 @@ export class AppController {
     description: 'Internal server error.',
     type: ErrorResponseDto,
   })
+  @SkipThrottle() // Probe endpoints must never be rate-limited (issue #970).
   @Get('health/ready')
   async getReadiness(
     @Res() res: Response,
