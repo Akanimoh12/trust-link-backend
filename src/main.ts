@@ -31,6 +31,19 @@ async function bootstrap(): Promise<INestApplication> {
 
   const configService = app.get(ConfigService);
 
+  // ── Reverse proxy trust (issue #971) ──────────────────────────────────────
+  // Behind a load balancer req.ip is the balancer's address, so every client
+  // shares one throttle bucket. TRUST_PROXY tells Express which X-Forwarded-For
+  // hops to honour. Unset leaves Express's default, which trusts no proxy.
+  const trustProxy = configService.get('TRUST_PROXY');
+  const trustProxySetting = trustProxy ? parseTrustProxy(trustProxy) : null;
+  if (trustProxySetting !== null) {
+    (app.getHttpAdapter().getInstance() as express.Express).set(
+      'trust proxy',
+      trustProxySetting,
+    );
+  }
+
   const sentryDsn = configService.get<string | undefined>('SENTRY_DSN');
   const connectSrc = buildCspConnectSrc({
     stellarNetwork: configService.get('STELLAR_NETWORK'),
